@@ -1,231 +1,160 @@
+%% ===========================================================================
+%% INTEGRATIVE ACTIVITY 6.2 - DISTRIBUTED PROGRAMMING IN ERLANG
+%% ALUMNO: Desideiro Iván Ortegón Morton  Matrícula: A00840591
+%% PROFESOR: Santiago Conant
+%% ARCHIVO: center.erl (Nodo de la Central)
+%% ===========================================================================
 -module(center).
--behaviour(gen_server).
-
--export([open_center/1, close_center/0]).
--export([start_link/1, stop/0]).
--export([add_taxi/1, remove_taxi/1, add_passenger/1, remove_passenger/1, complete_trip/1, request_taxi/2, taxi_list/0, travelers_list/0, completed_trips/0, get_state/0]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
-
--record(state, {
-    airport_location,
-    taxis = [],
-    taxi_monitors = [],
-    passengers = [],
-    trips = [],
-    trip_count = 0
-}).
+-export([open_center/1, close_center/0, taxi_list/0, travelers_list/0, completed_trips/0]).
+-export([init/1]).
 
 open_center(AirportLocation) ->
-    start_link(AirportLocation).
+    io:format("Sends: opening dispatch center at ~p~n", [AirportLocation]),
+    Pid = spawn(?MODULE, init, [AirportLocation]),
+    global:register_name(center, Pid),
+    {ok, Pid}.
 
 close_center() ->
-    stop().
-
-start_link(AirportLocation) ->
-    gen_server:start_link({local, center}, ?MODULE, AirportLocation, []).
-
-stop() ->
-    case whereis(center) of
-        undefined ->
-            {error, not_running};
-        _Pid ->
-            gen_server:call(center, stop)
-    end.
-
-add_taxi(TaxiPid) ->
-    gen_server:call(center, {add_taxi, TaxiPid}).
-
-remove_taxi(TaxiPid) ->
-    gen_server:call(center, {remove_taxi, TaxiPid}).
-
-add_passenger(Passenger) ->
-    gen_server:call(center, {add_passenger, Passenger}).
-
-remove_passenger(Passenger) ->
-    gen_server:call(center, {remove_passenger, Passenger}).
-
-complete_trip(Trip) ->
-    gen_server:call(center, {complete_trip, Trip}).
-
-request_taxi(Traveler, Origin) ->
-    gen_server:call(center, {request_taxi, Traveler, Origin}).
-
-taxi_list() ->
-    gen_server:call(center, taxi_list).
-
-travelers_list() ->
-    gen_server:call(center, travelers_list).
-
-completed_trips() ->
-    gen_server:call(center, completed_trips).
-
-get_state() ->
-    gen_server:call(center, get_state).
-
-init(AirportLocation) ->
-    process_flag(trap_exit, true),
-    {ok, #state{airport_location = AirportLocation}}.
-
-handle_call({add_taxi, TaxiId}, _From, State = #state{taxis = Taxis, taxi_monitors = Monitors}) ->
-    
-    case taxi_pid(TaxiId) of
-        undefined ->
-            {reply, {error, not_found}, State};
-        Pid ->
-            Ref = erlang:monitor(process, Pid),
-            UpdatedTaxis = lists:usort([TaxiId | Taxis]),
-            UpdatedMonitors = lists:keystore(TaxiId, 1, Monitors, {TaxiId, Pid, Ref}),
-            {reply, ok, State#state{taxis = UpdatedTaxis, taxi_monitors = UpdatedMonitors}}
-    end;
-handle_call({remove_taxi, TaxiId}, _From, State = #state{taxis = Taxis, taxi_monitors = Monitors}) ->
-    
-    case taxi_status(TaxiId) of
-        disponible ->
-            case lists:keytake(TaxiId, 1, Monitors) of
-                {value, {_TaxiId, _Pid, Ref}, RemainingMonitors} ->
-                    erlang:demonitor(Ref, [flush]),
-                    {reply, ok, State#state{taxis = lists:delete(TaxiId, Taxis), taxi_monitors = RemainingMonitors}};
-                false ->
-                    {reply, ok, State#state{taxis = lists:delete(TaxiId, Taxis)}}
-            end;
-        ocupado ->
-            {reply, {error, busy}, State};
-        undefined ->
-            case lists:keytake(TaxiId, 1, Monitors) of
-                {value, {_TaxiId, _Pid, Ref}, RemainingMonitors} ->
-                    erlang:demonitor(Ref, [flush]),
-                    {reply, ok, State#state{taxis = lists:delete(TaxiId, Taxis), taxi_monitors = RemainingMonitors}};
-                false ->
-                    {reply, ok, State#state{taxis = lists:delete(TaxiId, Taxis)}}
-            end
-    end;
-handle_call({add_passenger, Passenger}, _From, State = #state{passengers = Passengers}) ->
-    
-    {reply, ok, State#state{passengers = lists:usort([Passenger | Passengers])}};
-handle_call({remove_passenger, Passenger}, _From, State = #state{passengers = Passengers}) ->
-    
-    {reply, ok, State#state{passengers = lists:delete(Passenger, Passengers)}};
-handle_call({complete_trip, {started, _TripId, _TaxiId, _Traveler, _Origin} = Trip}, _From, State = #state{trips = Trips, trip_count = Count}) ->
-    {reply, ok, State#state{trips = [Trip | Trips], trip_count = Count}};
-handle_call({complete_trip, {completed, _TripId, _TaxiId, _Traveler, _AirportLocation} = Trip}, _From, State = #state{trips = Trips, trip_count = Count}) ->
-    {reply, ok, State#state{trips = [Trip | Trips], trip_count = Count + 1}};
-handle_call({complete_trip, Trip}, _From, State = #state{trips = Trips}) ->
-    {reply, ok, State#state{trips = [Trip | Trips]}};
-handle_call({request_taxi, Traveler, Origin}, _From, State = #state{taxis = Taxis, passengers = Passengers}) ->
-    
-    TripId = erlang:unique_integer([monotonic, positive]),
-    State1 = State#state{passengers = lists:usort([Traveler | Passengers])},
-    case negotiate_taxi(sort_taxis_by_distance(Taxis, Origin), Traveler, Origin, TripId) of
-        {ok, TaxiId} ->
-            {reply, {ok, {TaxiId, TripId}}, State1};
-        {error, no_available_taxi} ->
-            {reply, {error, no_available_taxi}, State#state{passengers = lists:delete(Traveler, Passengers)}}
-    end;
-handle_call(taxi_list, _From, State = #state{taxis = Taxis}) ->
-    Formatted = format_taxi_list(Taxis),
-    io:format("~s~n", [Formatted]),
-    {reply, {ok, Taxis}, State};
-handle_call(travelers_list, _From, State = #state{passengers = Passengers}) ->
-    Formatted = format_travelers_list(Passengers),
-    io:format("~s~n", [Formatted]),
-    {reply, {ok, Passengers}, State};
-handle_call(completed_trips, _From, State = #state{trips = Trips}) ->
-    Formatted = format_completed_trips(Trips),
-    io:format("~s~n", [Formatted]),
-    {reply, {ok, Trips}, State};
-handle_call(get_state, _From, State) ->
-    {reply, State, State};
-handle_call(stop, _From, State) ->
-    {stop, normal, ok, State};
-handle_call(_Request, _From, State) ->
-    {reply, {error, unknown_request}, State}.
-
-handle_cast(_Msg, State) ->
-    {noreply, State}.
-
-handle_info({'DOWN', Ref, process, Pid, Reason}, State = #state{taxis = Taxis, taxi_monitors = Monitors}) ->
-    case lists:keytake(Pid, 2, Monitors) of
-        {value, {TaxiId, Pid, Ref}, RemainingMonitors} ->
-            {noreply, State#state{taxis = lists:delete(TaxiId, Taxis), taxi_monitors = RemainingMonitors}};
-        false ->
-            {noreply, State}
-    end;
-handle_info({'EXIT', _FromPid, _Reason}, State) ->
-    {noreply, State};
-handle_info(_Info, State) ->
-    {noreply, State}.
-
-terminate(_Reason, #state{taxis = Taxis}) ->
-    lists:foreach(fun(TaxiPid) ->
-        case taxi_pid(TaxiPid) of
-            undefined ->
-                ok;
-            Pid ->
-                catch exit(Pid, shutdown)
-        end
-    end, Taxis),
+    io:format("Sends: closing dispatch center~n"),
+    global:send(center, {close_center, self()}),
     ok.
 
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+taxi_list() ->
+    io:format("Sends: requesting taxi list~n"),
+    global:send(center, {taxi_list, self()}),
+    receive {reply, List} -> List end.
 
-taxi_pid(TaxiId) when is_pid(TaxiId) ->
-    TaxiId;
-taxi_pid(TaxiId) ->
-    whereis(TaxiId).
+travelers_list() ->
+    io:format("Sends: requesting travelers list~n"),
+    global:send(center, {travelers_list, self()}),
+    receive {reply, List} -> List end.
 
-taxi_status(TaxiId) ->
-    case taxi:consult_taxi(TaxiId) of
-        {ok, {Status, _Location}} ->
-            Status;
-        {error, _Reason} ->
-            undefined
-    end.
+completed_trips() ->
+    io:format("Sends: requesting completed trips~n"),
+    global:send(center, {completed_trips, self()}),
+    receive {reply, Total} -> Total end.
 
-taxi_location(TaxiId) ->
-    case taxi:consult_taxi(TaxiId) of
-        {ok, {_Status, Location}} ->
-            Location;
-        {error, _Reason} ->
-            undefined
-    end.
+init(AirportLocation) ->
+    loop(AirportLocation, [], [], [], 0).
 
-sort_taxis_by_distance(Taxis, Origin) ->
-    AvailableTaxis = [
-        {TaxiId, euclidean_distance(Location, Origin)}
-        || TaxiId <- Taxis,
-           {ok, {disponible, Location}} <- [taxi:consult_taxi(TaxiId)]
-    ],
-    [TaxiId || {TaxiId, _Distance} <- lists:sort(fun({_, D1}, {_, D2}) -> D1 =< D2 end, AvailableTaxis)].
+loop(AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter) ->
+    receive
+        {register_taxi, TaxiId, TaxiPid, Location} ->
+            io:format("Receives: registration request from ~p at ~p~n", [TaxiId, Location]),
+            erlang:monitor(process, TaxiPid),
+            loop(AirportLocation, [{TaxiId, TaxiPid} | Taxis], ActiveTrips, CompletedTrips, TripCounter);
 
-negotiate_taxi([], _Traveler, _Origin, _TripId) ->
-    {error, no_available_taxi};
-negotiate_taxi([TaxiId | Rest], Traveler, Origin, TripId) ->
-    taxi:propose_taxi(TaxiId, {Traveler, Origin, TripId}),
-    case taxi:accept_trip(TaxiId, TripId) of
-        {ok, {TaxiId, TripId}} ->
-            {ok, TaxiId};
-        {error, busy} ->
-            taxi:reject_trip(TaxiId, TripId),
-            negotiate_taxi(Rest, Traveler, Origin, TripId);
-        {error, _Reason} ->
+        {request_taxi, Traveler, Origin, TravelerPid} ->
+            io:format("Receives: taxi request from ~p at ~p~n", [Traveler, Origin]),
+            AvailableTaxis = query_taxis_status(Taxis),
+            case AvailableTaxis of
+                [] -> 
+                    TravelerPid ! {error, unavailable},
+                    loop(AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter);
+                _ ->
+                    SortedTaxis = sort_taxis_by_dist(Origin, AvailableTaxis),
+                    TempTripId = TripCounter + 1,
+                    dispatch_proposal(TempTripId, Traveler, Origin, TravelerPid, SortedTaxis, AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter)
+            end;
+
+        {accept_trip, TaxiId, TripId, TaxiPid} ->
+            io:format("Receives: trip acceptance from ~p for Trip ~p~n", [TaxiId, TripId]),
+            case lists:keytake(TripId, 1, ActiveTrips) of
+                {value, {TripId, TaxiId, Traveler, Origin, TravelerPid, proposing, _}, UtterRest} ->
+                    NewCounter = TripCounter + 1,
+                    NewActive = [{NewCounter, TaxiId, Traveler, Origin, assigned} | UtterRest],
+                    TravelerPid ! {ok, TaxiId, NewCounter},
+                    TaxiPid ! {confirm_assignment, NewCounter},
+                    loop(AirportLocation, Taxis, NewActive, CompletedTrips, NewCounter);
+                _ -> loop(AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter)
+            end;
+
+        {reject_trip, TaxiId, TripId} ->
+            io:format("Receives: trip rejection from ~p for Trip ~p~n", [TaxiId, TripId]),
+            case lists:keytake(TripId, 1, ActiveTrips) of
+                {value, {TripId, TaxiId, Traveler, Origin, TravelerPid, proposing, SortedRest}, UtterRest} ->
+                    dispatch_proposal(TripId, Traveler, Origin, TravelerPid, SortedRest, AirportLocation, Taxis, UtterRest, CompletedTrips, TripCounter);
+                _ -> loop(AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter)
+            end;
+
+        {service_started, TaxiId} ->
+            io:format("Receives: service started notification from ~p~n", [TaxiId]),
+            NewActive = lists:map(fun({TripId, TId, Trav, Orig, assigned}) when TId == TaxiId ->
+                                        {TripId, TId, Trav, Orig, in_trip};
+                                     (Other) -> Other
+                                  end, ActiveTrips),
+            loop(AirportLocation, Taxis, NewActive, CompletedTrips, TripCounter);
+
+        {service_completed, TaxiId} ->
+            io:format("Receives: service completed notification from ~p~n", [TaxiId]),
+            case lists:keytake(TaxiId, 2, ActiveTrips) of
+                {value, {TripId, TaxiId, Traveler, Origin, in_trip}, RestActive} ->
+                    NewCompleted = [{TripId, TaxiId, Traveler, Origin} | CompletedTrips],
+                    case lists:keyfind(TaxiId, 1, Taxis) of
+                        {TaxiId, TPid} -> TPid ! {airport_location, AirportLocation};
+                        false -> ok
+                    end,
+                    loop(AirportLocation, Taxis, RestActive, NewCompleted, TripCounter);
+                _ -> loop(AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter)
+            end;
+
+        {taxi_list, From} ->
+            io:format("Receives: taxi list request~n"),
+            io:format("~n--- LISTA DE TAXIS ACTIVOS ---~n"),
+            lists:foreach(fun({Id, Pid}) -> io:format("Taxi ID: ~p | PID: ~p~n", [Id, Pid]) end, Taxis),
+            From ! {reply, ok},
+            loop(AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter);
             
-            negotiate_taxi(Rest, Traveler, Origin, TripId)
+        {travelers_list, From} ->
+            io:format("Receives: travelers list request~n"),
+            io:format("~n--- PASAJEROS EN VIAJE ACTIVO ---~n"),
+            lists:foreach(fun({TripId, TaxiId, Traveler, Origin, Status}) -> 
+                            io:format("Trip: ~p | Pasajero: ~p | Taxi: ~p | Status: ~p~n", [TripId, Traveler, TaxiId, Status]) 
+                          end, ActiveTrips),
+            From ! {reply, ok},
+            loop(AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter);
+
+        {completed_trips, From} ->
+            io:format("Receives: completed trips request~n"),
+            io:format("~n--- HISTORIAL DE VIAJES COMPLETADOS ---~n"),
+            lists:foreach(fun({TripId, TaxiId, Traveler, Origin}) -> 
+                            io:format("Trip ID: ~p | Taxi: ~p | Pasajero: ~p | Origen: ~p~n", [TripId, TaxiId, Traveler, Origin]) 
+                          end, CompletedTrips),
+            From ! {reply, length(CompletedTrips)},
+            loop(AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter);
+
+        {'DOWN', _Ref, process, Pid, _Reason} ->
+            NewTaxis = lists:filter(fun({_, P}) -> P /= Pid end, Taxis),
+            loop(AirportLocation, NewTaxis, ActiveTrips, CompletedTrips, TripCounter);
+
+        {close_center, From} ->
+            io:format("Receives: Shutting down center... terminating taxis~n"),
+            lists:foreach(fun({_, Pid}) -> exit(Pid, shutdown) end, Taxis),
+            From ! {reply, center_closed},
+            exit(normal)
     end.
 
-euclidean_distance({X1, Y1}, {X2, Y2}) ->
-    math:sqrt(math:pow(X2 - X1, 2) + math:pow(Y2 - Y1, 2)).
+query_taxis_status(Taxis) ->
+    lists:filtermap(fun({TaxiId, Pid}) ->
+        Pid ! {query_status, self()},
+        receive
+            {status_reply, TaxiId, Location, available} -> {true, {TaxiId, Pid, Location}};
+            {status_reply, _, _, _} -> false
+        after 1000 -> false
+        end
+    end, Taxis).
 
-format_taxi_list(Taxis) ->
-    Entries = [io_lib:format("- ~p", [TaxiId]) || TaxiId <- Taxis],
-    lists:flatten(["Taxis activos:", lists:join("\n", Entries)]).
+sort_taxis_by_dist({X1, Y1}, AvailableTaxis) ->
+    lists:sort(fun({_, _, {Xa, Ya}}, {_, _, {Xb, Yb}}) ->
+        math:sqrt((Xa - X1)*(Xa - X1) + (Ya - Y1)*(Ya - Y1)) =< 
+        math:sqrt((Xb - X1)*(Xb - X1) + (Yb - Y1)*(Yb - Y1))
+    end, AvailableTaxis).
 
-format_travelers_list(Passengers) ->
-    Entries = [io_lib:format("- ~p", [Passenger]) || Passenger <- Passengers],
-    lists:flatten(["Viajeros activos:", lists:join("\n", Entries)]).
-
-format_completed_trips(Trips) ->
-    CompletedTrips = [Trip || Trip = {completed, _, _, _, _} <- lists:reverse(Trips)],
-    Entries = [io_lib:format("- ~p", [Trip]) || Trip <- CompletedTrips],
-    lists:flatten(["Viajes completados:", lists:join("\n", Entries)]).
-
+dispatch_proposal(TripId, Traveler, Origin, TravelerPid, [], AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter) ->
+    TravelerPid ! {error, unavailable},
+    loop(AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter);
+dispatch_proposal(TripId, Traveler, Origin, TravelerPid, [{BestTaxiId, BestTaxiPid, _} | Rest], AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter) ->
+    io:format("Sends: center proposes Trip ~p to ~p~n", [TripId, BestTaxiId]),
+    BestTaxiPid ! {propose_trip, TripId, Traveler, Origin},
+    NewActive = [{TripId, BestTaxiId, Traveler, Origin, TravelerPid, proposing, Rest} | ActiveTrips],
+    loop(AirportLocation, Taxis, NewActive, CompletedTrips, TripCounter).
