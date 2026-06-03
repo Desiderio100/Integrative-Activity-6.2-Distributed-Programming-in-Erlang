@@ -1,6 +1,6 @@
 %% ===========================================================================
 %% INTEGRATIVE ACTIVITY 6.2 - DISTRIBUTED PROGRAMMING IN ERLANG
-%% ALUMNO: Desideiro Iván Ortegón Morton  Matrícula: A00840591
+%% ALUMNO: Desideiro Iván Ortegón Morton  Matrícula: A00840591 y Pablo Carrera Dollero || A00843410
 %% ARCHIVO: traveler.erl (Nodo de Pasajeros)
 %% ===========================================================================
 -module(traveler).

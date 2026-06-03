@@ -1,165 +1,84 @@
+%% ===========================================================================
+%% INTEGRATIVE ACTIVITY 6.2 - DISTRIBUTED PROGRAMMING IN ERLANG
+%% ALUMNO: Desideiro Iván Ortegón Morton  Matrícula: A00840591 y Pablo Carrera Dollero || A00843410
+%% ARCHIVO: taxi.erl (Nodo de Vehículos)
+%% ===========================================================================
 -module(taxi).
--behaviour(gen_server).
-
--export([register_taxi/2, current_location/2, consult_taxi/1, accept_trip/2, reject_trip/2, service_started/1, service_completed/1, propose_taxi/2]).
--export([start_link/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
-
--record(state, {
-    taxi_id,
-    location = {0, 0},
-    status = disponible,
-    pending_trip = undefined,
-    current_trip = undefined
-}).
+-export([register_taxi/2, current_location/2, accept_trip/2, reject_trip/2, remove_taxi/1, consult_taxi/1, service_started/1, service_completed/1]).
+-export([taxi_loop/4]).
 
 register_taxi(TaxiId, InitialLocation) ->
-    case is_atom(TaxiId) of
-        false ->
-            {error, invalid_taxi_id};
-        true ->
-            
-            case whereis(TaxiId) of
-                undefined ->
-                    case start_link(TaxiId, InitialLocation) of
-                        {ok, Pid} ->
-                            case center:add_taxi(TaxiId) of
-                                ok ->
-                                    {ok, Pid};
-                                Error ->
-                                    gen_server:stop(Pid),
-                                    Error
-                            end;
-                        Error ->
-                            Error
-                    end;
-                _Pid ->
-                    {error, already_registered}
-            end
-    end.
-
-current_location(TaxiId, Location) ->
-    case is_atom(TaxiId) of
-        true ->
-            
-            gen_server:call(TaxiId, {current_location, Location});
-        false ->
-            {error, invalid_taxi_id}
-    end.
-
-consult_taxi(TaxiId) ->
-    case is_atom(TaxiId) of
-        true ->
-            
-            case whereis(TaxiId) of
-                undefined ->
-                    {error, not_found};
-                _Pid ->
-                    gen_server:call(TaxiId, consult)
-            end;
-        false ->
-            {error, invalid_taxi_id}
-    end.
-
-accept_trip(TaxiId, TripId) ->
-    case is_atom(TaxiId) of
-        true ->
-            
-            gen_server:call(TaxiId, {accept_trip, TripId});
-        false ->
-            {error, invalid_taxi_id}
-    end.
-
-reject_trip(TaxiId, TripId) ->
-    case is_atom(TaxiId) of
-        true ->
-            
-            gen_server:call(TaxiId, {reject_trip, TripId});
-        false ->
-            {error, invalid_taxi_id}
-    end.
-
-service_started(TaxiId) ->
-    case is_atom(TaxiId) of
-        true ->
-            gen_server:call(TaxiId, service_started);
-        false ->
-            {error, invalid_taxi_id}
-    end.
-
-service_completed(TaxiId) ->
-    case is_atom(TaxiId) of
-        true ->
-            gen_server:call(TaxiId, service_completed);
-        false ->
-            {error, invalid_taxi_id}
-    end.
-
-propose_taxi(TaxiId, Proposal) ->
-    case is_atom(TaxiId) of
-        true ->
-            gen_server:cast(TaxiId, {proposal, Proposal});
-        false ->
-            {error, invalid_taxi_id}
-    end.
-
-start_link(TaxiId, InitialLocation) ->
-    gen_server:start_link({local, TaxiId}, ?MODULE, {TaxiId, InitialLocation}, []).
-
-init({TaxiId, InitialLocation}) ->
-    process_flag(trap_exit, true),
-    {ok, #state{taxi_id = TaxiId, location = InitialLocation}}.
-
-handle_call({current_location, Location}, _From, State) ->
-    
-    {reply, ok, State#state{location = Location}};
-handle_call({accept_trip, TripId}, _From, State = #state{taxi_id = TaxiId, status = disponible, pending_trip = {Traveler, Origin, TripId}}) ->
-    
-    {reply, {ok, {TaxiId, TripId}}, State#state{status = ocupado, current_trip = {Traveler, Origin, TripId}, pending_trip = undefined}};
-handle_call({accept_trip, TripId}, _From, State) ->
-    
-    {reply, {error, busy}, State};
-handle_call({reject_trip, TripId}, _From, State = #state{pending_trip = {_, _, TripId}}) ->
-    
-    {reply, {ok, rejected}, State#state{pending_trip = undefined}};
-handle_call({reject_trip, TripId}, _From, State) ->
-    
-    {reply, {ok, rejected}, State};
-handle_call(service_started, _From, State = #state{current_trip = {Traveler, Origin, TripId}, taxi_id = TaxiId}) ->
-    center:complete_trip({started, TripId, TaxiId, Traveler, Origin}),
-    {reply, ok, State#state{status = ocupado, location = Origin}};
-handle_call(service_started, _From, State) ->
-    
-    {reply, {error, no_active_trip}, State};
-handle_call(service_completed, _From, State = #state{current_trip = {Traveler, _Origin, TripId}, taxi_id = TaxiId}) ->
-    case center:get_state() of
-        {state, AirportLocation, _Taxis, _Passengers, _Trips, _TripCount} ->
-            center:complete_trip({completed, TripId, TaxiId, Traveler, AirportLocation}),
-            center:remove_passenger(Traveler),
-            {reply, ok, State#state{status = disponible, location = AirportLocation, current_trip = undefined, pending_trip = undefined}};
-        _Other ->
-            {reply, ok, State#state{status = disponible, current_trip = undefined, pending_trip = undefined}}
-    end;
-handle_call(service_completed, _From, State) ->
-    
-    {reply, {error, no_active_trip}, State};
-handle_call(consult, _From, State = #state{status = Status, location = Location}) ->
-    {reply, {ok, {Status, Location}}, State};
-handle_call(Request, _From, State) ->
-    {reply, {error, unknown_request}, State}.
-
-handle_cast({proposal, Proposal}, State) ->
-    {noreply, State#state{pending_trip = Proposal}};
-handle_cast(Msg, State) ->
-    {noreply, State}.
-
-handle_info(Info, State) ->
-    {noreply, State}.
-
-terminate(_Reason, #state{taxi_id = TaxiId, status = disponible}) ->
-    catch center:remove_taxi(TaxiId),
-    ok;
-terminate(_Reason, _State) ->
+    io:format("Sends: ~p registering at location ~p~n", [TaxiId, InitialLocation]),
+    Pid = spawn(?MODULE, taxi_loop, [TaxiId, InitialLocation, available, nil]),
+    %% Intentar desregistrar el nombre local por si quedó colgado de ejecuciones anteriores
+    catch unregister(TaxiId),
+    register(TaxiId, Pid),
+    global:send(center, {register_taxi, TaxiId, Pid, InitialLocation}),
     ok.
 
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+current_location(TaxiId, Location) ->
+    io:format("Sends: ~p updating location to ~p~n", [TaxiId, Location]),
+    TaxiId ! {update_location, Location},
+    ok.
+
+accept_trip(TaxiId, TripId) ->
+    io:format("Sends: ~p accepts Trip ~p~n", [TaxiId, TripId]),
+    TaxiId ! {user_accept, TripId},
+    ok.
+
+reject_trip(TaxiId, TripId) ->
+    io:format("Sends: ~p rejects Trip ~p~n", [TaxiId, TripId]),
+    TaxiId ! {user_reject, TripId},
+    ok.
+
+remove_taxi(TaxiId) ->
+    io:format("Sends: ~p requesting removal~n", [TaxiId]),
+    TaxiId ! {user_remove, self()},
+    receive {reply, Res} -> Res end.
+
+consult_taxi(TaxiId) ->
+    io:format("Sends: consulting status for ~p~n", [TaxiId]),
+    TaxiId ! {consult, self()},
+    receive {reply, State} -> State end.
+
+service_started(TaxiId) ->
+    io:format("Sends: ~p notifies service started~n", [TaxiId]),
+    TaxiId ! {user_started},
+    ok.
+
+service_completed(TaxiId) ->
+    io:format("Sends: ~p notifies service completed~n", [TaxiId]),
+    TaxiId ! {user_completed},
+    ok.
+
+taxi_loop(TaxiId, Location, Status, CurrentTrip) ->
+    receive
+        {query_status, CenterPid} ->
+            CenterPid ! {status_reply, TaxiId, Location, Status},
+            taxi_loop(TaxiId, Location, Status, CurrentTrip);
+        {propose_trip, TripId, Traveler, Origin} ->
+            io:format("Receives: trip proposal for Trip ~p from ~p at ~p~n", [TripId, Traveler, Origin]),
+            taxi_loop(TaxiId, Location, offered, {TripId, Traveler, Origin});
+        {user_accept, TripId} ->
+            global:send(center, {accept_trip, TaxiId, TripId, self()}),
+            taxi_loop(TaxiId, Location, offered, CurrentTrip);
+        {user_reject, TripId} ->
+            global:send(center, {reject_trip, TaxiId, TripId}),
+            taxi_loop(TaxiId, Location, available, nil);
+        {confirm_assignment, _ConfirmedTripId} ->
+            io:format("Receives: assignment confirmed for Trip ~p~n", [_ConfirmedTripId]),
+            taxi_loop(TaxiId, Location, assigned, CurrentTrip);
+        {user_started} ->
+            global:send(center, {service_started, TaxiId}),
+            {_, _, PassengerOrigin} = CurrentTrip,
+            taxi_loop(TaxiId, PassengerOrigin, occupied, CurrentTrip);
+        {user_completed} ->
+            global:send(center, {service_completed, TaxiId}),
+            receive {airport_location, AirportLocation} -> taxi_loop(TaxiId, AirportLocation, available, nil) end;
+        {consult, From} ->
+            From ! {reply, {Status, Location}},
+            taxi_loop(TaxiId, Location, Status, CurrentTrip);
+        {user_remove, From} ->
+            global:send(center, {remove_taxi, TaxiId}),
+            From ! {reply, ok}
+    end.

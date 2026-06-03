@@ -1,6 +1,6 @@
 %% ===========================================================================
 %% INTEGRATIVE ACTIVITY 6.2 - DISTRIBUTED PROGRAMMING IN ERLANG
-%% ALUMNO: Desideiro Iván Ortegón Morton  Matrícula: A00840591
+%% ALUMNO: Desideiro Iván Ortegón Morton  Matrícula: A00840591 y Pablo Carrera Dollero || A00843410
 %% PROFESOR: Santiago Conant
 %% ARCHIVO: center.erl (Nodo de la Central)
 %% ===========================================================================
@@ -11,7 +11,7 @@
 open_center(AirportLocation) ->
     io:format("Sends: opening dispatch center at ~p~n", [AirportLocation]),
     Pid = spawn(?MODULE, init, [AirportLocation]),
-    global:register_name(center, Pid),
+    global:re_register_name(center, Pid),
     {ok, Pid}.
 
 close_center() ->
@@ -42,7 +42,9 @@ loop(AirportLocation, Taxis, ActiveTrips, CompletedTrips, TripCounter) ->
         {register_taxi, TaxiId, TaxiPid, Location} ->
             io:format("Receives: registration request from ~p at ~p~n", [TaxiId, Location]),
             erlang:monitor(process, TaxiPid),
-            loop(AirportLocation, [{TaxiId, TaxiPid} | Taxis], ActiveTrips, CompletedTrips, TripCounter);
+            %% Evitar duplicados en la lista global de la central si se vuelve a registrar
+            CleanTaxis = lists:keydelete(TaxiId, 1, Taxis),
+            loop(AirportLocation, [{TaxiId, TaxiPid} | CleanTaxis], ActiveTrips, CompletedTrips, TripCounter);
 
         {request_taxi, Traveler, Origin, TravelerPid} ->
             io:format("Receives: taxi request from ~p at ~p~n", [Traveler, Origin]),
